@@ -8,8 +8,8 @@ from collections import Counter
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
-MODEL = "IDEA-Research/grounding-dino-tiny"
+os.environ.setdefault("YOLO_OFFLINE", "true")
+MODEL = str(Path(__file__).resolve().parent / "models" / "best.pt")
 NAMES = {
     "gallbladder": "담낭", "gizzard": "근위", "heart": "심장",
     "kidney": "신장", "large_intestine": "대장", "liver": "간",
@@ -86,38 +86,37 @@ def overlay(image, result, threshold=0.35, selected=None):
     return canvas, rows
 
 @st.cache_resource(show_spinner=False)
-def load_model():
-    from transformers import pipeline
-    return pipeline("zero-shot-object-detection", model=MODEL, device=-1)
+def load_model(weight_mtime):
+    from ultralytics import YOLO
+    return YOLO(MODEL)
 
 def infer(model, image):
-    labels = ["liver", "heart", "lungs", "kidney", "spleen", "gallbladder",
-              "gizzard", "small intestine", "large intestine", "ovary",
-              "ovarian follicle", "trachea", "tongue", "abdominal fat"]
-    detections = model(image, candidate_labels=labels, threshold=0.1)
-    w,h = image.size
+    import torch
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    result = model.predict(image, conf=0.1, imgsz=640, device=device, verbose=False)[0]
     predictions = []
-    for p in detections:
-        b = p["box"]
-        x1,y1,x2,y2 = (float(b[k]) for k in ("xmin","ymin","xmax","ymax"))
-        predictions.append({"class": str(p["label"]).strip().rstrip("."),
-                            "confidence": float(p["score"]),
-                            "x": (x1+x2)/2, "y": (y1+y2)/2,
-                            "width": x2-x1, "height": y2-y1})
+    for box in result.boxes:
+        x,y,w,h = box.xywh[0].cpu().tolist()
+        label = result.names[int(box.cls.item())]
+        predictions.append(dict(x=x,y=y,width=w,height=h,confidence=float(box.conf.item()),class_=label))
+        predictions[-1]["class"] = predictions[-1].pop("class_")
+    w,h = image.size
     return {"image":{"width":w,"height":h},"predictions":predictions}
 
 def main():
     st.set_page_config(page_title="가금류 부검 분석", page_icon="🔬", layout="wide")
     st.title("가금류 부검 사진 · 장기 인식")
-    st.caption("Grounding DINO / Zero-shot 로컬 추론 · 연구용")
+    st.caption("YOLO11 / 닭 장기 전용 로컬 추론 · 연구용")
     st.warning("장기 인식 실험용입니다. 질병 진단 또는 정상 판정 기능은 아닙니다.")
     with st.sidebar:
         st.header("모델 설정")
         st.write(MODEL)
-        st.markdown("[모델 정보](https://huggingface.co/IDEA-Research/grounding-dino-tiny)")
+        st.markdown("[모델 정보](https://universe.roboflow.com/na-u0cmg/biovision_chicken)")
         threshold = st.slider("표시 신뢰도 기준", 0.0, 1.0, 0.35, 0.05)
         compare = st.checkbox("원본 함께 표시", value=True)
-        st.caption("최초 실행 시 공개 가중치를 다운로드합니다. 이후 CPU 로컬 추론을 수행합니다. API 키는 필요하지 않습니다. 닭 장기 특화 모델이 아니므로 검출 결과는 전문가 검증이 필요합니다.")
+        st.caption("학습된 models/best.pt를 로컬에서 사용합니다. API 키 불필요.")
+        if not Path(MODEL).is_file():
+            st.warning("먼저 bash train.sh를 실행하여 모델을 학습하세요.")
     uploads = st.file_uploader("부검 사진 여러 장 선택 또는 드래그", type=["jpg","jpeg","png","webp"], accept_multiple_files=True)
     if "results" not in st.session_state:
         st.session_state.results = {}
@@ -126,10 +125,10 @@ def main():
         data = f.getvalue()
         uid = hashlib.sha256(data).hexdigest()
         items.append((uid, f.name, data))
-    if st.button("전체 사진 자동 분석", type="primary", disabled=not items):
+    if st.button("전체 사진 자동 분석", type="primary", disabled=not items or not Path(MODEL).is_file()):
         try:
-            with st.spinner("로컬 모델 로딩 중 (최초 실행 시 가중치 다운로드)"):
-                client = load_model()
+            with st.spinner("로컬 모델 로딩 중"):
+                client = load_model(Path(MODEL).stat().st_mtime_ns)
         except Exception as exc:
             msg = str(exc)
             st.error("로컬 모델을 불러오지 못했습니다: " + msg[:500])
