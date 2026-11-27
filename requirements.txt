@@ -1,4 +1,5 @@
 streamlit>=1.40,<2
 Pillow>=10,<13
-inference-sdk>=1.5,<2
+inference>=0.50,<2
 python-dotenv>=1,<2
+numpy
