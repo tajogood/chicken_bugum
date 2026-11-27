@@ -8,7 +8,8 @@ from collections import Counter
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from inference_sdk import InferenceHTTPClient, InferenceConfiguration
+os.environ.setdefault('ENABLE_INFERENCE_TELEMETRY', 'false')
+os.environ.setdefault('ROBOFLOW_METRICS_ENABLED', 'false')
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -88,31 +89,39 @@ def overlay(image, result, threshold=0.35, selected=None):
                      "bbox_xyxy": [x1,y1,x2,y2]})
     return canvas, rows
 
-def infer(client, image):
-    import tempfile
-    with tempfile.TemporaryDirectory() as folder:
-        path = Path(folder) / "image.jpg"
-        path.write_bytes(jpeg(image))
-        result = client.infer(str(path), model_id=MODEL)
+@st.cache_resource(show_spinner=False)
+def load_model(api_key):
+    from inference import get_model
+    return get_model(model_id=MODEL, api_key=api_key or None)
+
+def infer(model, image):
+    import numpy as np
+    bgr = np.asarray(image)[:, :, ::-1].copy()
+    result = model.infer(bgr, confidence=0.1)
+    if isinstance(result, list):
+        result = result[0]
+    if hasattr(result, "model_dump"):
+        result = result.model_dump(mode="json")
+    elif hasattr(result, "dict"):
+        result = result.dict()
     if not isinstance(result, dict) or not isinstance(result.get("predictions"), list):
-        raise ValueError("Unexpected inference response")
+        raise ValueError("Unexpected local inference response")
     return result
 
 def main():
     st.set_page_config(page_title="가금류 부검 분석", page_icon="🔬", layout="wide")
     st.title("가금류 부검 사진 · 장기 인식")
-    st.caption("BioVision Chicken / 9개 장기 / 사전 학습 모델 · 연구용")
+    st.caption("BioVision Chicken / 9개 장기 / 로컬 추론 · 연구용")
     st.warning("장기 인식 실험용입니다. 질병 진단 또는 정상 판정 기능은 아닙니다.")
     with st.sidebar:
         st.header("모델 설정")
         st.write(MODEL)
         st.markdown("[모델 정보](https://universe.roboflow.com/na-u0cmg/biovision_chicken)")
-        api_key = st.text_input("Roboflow API Key", value=os.getenv("ROBOFLOW_API_KEY", ""), type="password")
+        api_key = st.text_input("모델 다운로드 인증키 (필요한 경우)", value=os.getenv("ROBOFLOW_API_KEY", ""), type="password")
         st.markdown("[API 키 발급](https://app.roboflow.com/)")
         threshold = st.slider("표시 신뢰도 기준", 0.0, 1.0, 0.35, 0.05)
         compare = st.checkbox("원본 함께 표시", value=True)
-        consent = st.checkbox("분석 사진을 Roboflow 클라우드에 전송하는 것에 동의")
-        st.caption("웹앱은 로컬에서 실행되지만 추론은 외부 API에서 수행됩니다. API 비용/사용량 제한이 적용될 수 있습니다.")
+        st.caption("사진 추론은 맥북에서 직접 실행합니다. 모델 최초 다운로드 및 인증에는 인터넷과 키가 필요할 수 있습니다. 클라우드 추론 대체 경로는 없습니다.")
     uploads = st.file_uploader("부검 사진 여러 장 선택 또는 드래그", type=["jpg","jpeg","png","webp"], accept_multiple_files=True)
     if "results" not in st.session_state:
         st.session_state.results = {}
@@ -121,9 +130,14 @@ def main():
         data = f.getvalue()
         uid = hashlib.sha256(data).hexdigest()
         items.append((uid, f.name, data))
-    if st.button("전체 사진 자동 분석", type="primary", disabled=not (items and api_key and consent)):
-        client = InferenceHTTPClient(api_url="https://serverless.roboflow.com", api_key=api_key).configure(
-            InferenceConfiguration(api_key_transport="header", confidence_threshold=0.1))
+    if st.button("전체 사진 자동 분석", type="primary", disabled=not items):
+        try:
+            with st.spinner("로컬 모델 로딩 중 (최초 실행 시 가중치 다운로드)"):
+                client = load_model(api_key)
+        except Exception as exc:
+            msg = str(exc)
+            st.error("로컬 모델을 불러오지 못했습니다: " + (msg.replace(api_key,"[REDACTED]") if api_key else msg)[:500])
+            st.stop()
         st.session_state.results = {}
         bar = st.progress(0)
         for i,(uid,filename,data) in enumerate(items):
@@ -132,7 +146,7 @@ def main():
                 st.session_state.results[uid] = {"image": image, "result": infer(client,image)}
             except Exception as exc:
                 # Do not expose API secrets potentially embedded in error messages.
-                st.session_state.results[uid] = {"error": str(exc).replace(api_key,"[REDACTED]")[:500]}
+                st.session_state.results[uid] = {"error": (str(exc).replace(api_key,"[REDACTED]") if api_key else str(exc))[:500]}
             bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)} 분석 완료")
     available = sorted({str(p["class"]) for uid,_,_ in items
                         for p in st.session_state.results.get(uid,{}).get("result",{}).get("predictions",[])})
