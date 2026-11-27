@@ -1,5 +1,6 @@
 streamlit>=1.40,<2
 Pillow>=10,<13
-inference>=0.50,<2
-python-dotenv>=1,<2
-numpy
+torch>=2.5,<3
+torchvision>=0.20,<1
+transformers>=4.51,<5
+timm>=1,<2
