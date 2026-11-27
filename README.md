@@ -1,16 +1,32 @@
-# Chicken Necropsy — API 키 없는 로컬 장기 인식 실험
+# Chicken Necropsy — 닭 장기 전용 YOLO 로컬 학습 및 추론
 
-Roboflow BioVision_Chicken 모델 다운로드 권한 오류로 기본 모델을 [Grounding DINO Tiny](https://huggingface.co/IDEA-Research/grounding-dino-tiny)로 교체했습니다. 닭 장기 특화 모델이 아닌 범용 zero-shot 검출 모델입니다. 성능은 검증되지 않았으며 질병 진단에 사용하지 마세요.
-
-## macOS (Python 3.11 권장)
-기존 저장소에서:
+## 1. 데이터 준비
+[BioVision Chicken v1](https://universe.roboflow.com/na-u0cmg/biovision_chicken/dataset/1) (na, CC BY 4.0, 1022 generated images).
+Download Dataset → YOLOv8 format → ZIP 다운로드 → 압축 해제하여 저장소의 dataset/ 폴더에 data.yaml, train/images, train/labels, valid/images, valid/labels 등이 오도록 배치. 사이트 로그인/다운로드 권한이 필요할 수 있습니다.
+또는 선택적으로 API로 데이터만 다운로드:
 ```bash
-git pull
+python3 -m venv .venv
+source .venv/bin/activate
+pip install roboflow
+python download_dataset.py
+```
+API 키는 데이터 다운로드에만 쓰이며 학습 및 추론에는 사용하지 않습니다. 다운로드 접근 실패 시 웹 ZIP 방식 사용.
+
+## 2. 로컬 학습
+```bash
+bash train.sh
+```
+YOLO11n 사전 학습 기반 전이학습, Apple GPU MPS 자동 선택, 60 epochs, batch 8, 640px. 최초 기반 모델 다운로드 및 라이브러리 설치는 인터넷 필요. 학습 결과 models/best.pt, 상세 지표 runs/organ*.
+다른 데이터 위치: bash train.sh --data /path/to/data.yaml
+GPU 오류: bash train.sh --device cpu
+메모리 부족: bash train.sh --batch 4
+짧은 테스트: bash train.sh --epochs 1 (정확도 평가용 아님).
+
+## 3. 웹앱
+```bash
 bash run.sh
 ```
-http://127.0.0.1:8501 접속. 여러 사진을 선택하고 전체 사진 자동 분석을 누릅니다.
-최초 실행 시 Hugging Face에서 공개 모델 가중치를 다운로드합니다. API 키 불필요. CPU 로컬 추론이며 사진은 외부 API에 전송하지 않습니다. 가중치는 로컬 캐시에 보관됩니다. 오프라인 캐시 사용 시 HF_HUB_OFFLINE=1 bash run.sh (이미 필요한 파일이 다운로드되어 있어야 함).
-원본 비교, 신뢰도 및 장기 필터, JPG 및 JSON ZIP 저장 지원. 장기 위치는 사각형으로 표시. 실제 부검 사진 및 M5 환경에서 아직 실행 검증하지 못했습니다.
+http://127.0.0.1:8501. 여러 사진 업로드 → 전체 사진 자동 분석. 장기별 오버레이, 신뢰도 필터, 원본 비교, JPG/JSON ZIP 다운로드. API 키 및 클라우드 추론 없음. models/best.pt가 없으면 분석 비활성화.
 
-## 모델 교체 이력
-BioVision_Chicken/1 전용 모델은 사용자 환경에서 리소스 접근 오류가 발생하여 제거했습니다. 이전 구현은 Git 이력에 남아 있습니다.
+## 제한
+실제 데이터 다운로드, 학습, 맥북 실행은 아직 검증하지 못했습니다. 공개 데이터의 증강 이미지와 동일 개체 중복 가능성을 고려하여 독립 부검 사진에서 성능을 평가해야 합니다. 질병 진단용 아님. Ultralytics AGPL-3.0 또는 기업 라이선스 조건 및 데이터 출처 표시 확인 필요. 사진/가중치/데이터는 Git에 올리지 않도록 제외했습니다.
