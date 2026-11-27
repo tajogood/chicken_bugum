@@ -8,16 +8,12 @@ from collections import Counter
 
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-os.environ.setdefault('ENABLE_INFERENCE_TELEMETRY', 'false')
-os.environ.setdefault('ROBOFLOW_METRICS_ENABLED', 'false')
-from dotenv import load_dotenv
-
-load_dotenv()
-MODEL = "biovision_chicken/1"
+os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
+MODEL = "IDEA-Research/grounding-dino-tiny"
 NAMES = {
     "gallbladder": "담낭", "gizzard": "근위", "heart": "심장",
     "kidney": "신장", "large_intestine": "대장", "liver": "간",
-    "lungs": "폐", "small_intestine": "소장", "spleen": "비장",
+    "lungs": "폐", "small_intestine": "소장", "spleen": "비장", "ovary": "난소", "ovarian_follicle": "난포", "trachea": "기관", "tongue": "혀", "abdominal_fat": "복부 지방",
 }
 COLORS = ["#36d399", "#60a5fa", "#fbbf24", "#f472b6", "#a78bfa",
           "#fb923c", "#22d3ee", "#f87171", "#a3e635"]
@@ -27,7 +23,7 @@ def name_ko(label):
 
 def color(label):
     key = label.lower().replace(" ", "_")
-    return COLORS[list(NAMES).index(key)] if key in NAMES else "#ffffff"
+    return COLORS[list(NAMES).index(key) % len(COLORS)] if key in NAMES else "#ffffff"
 
 def jpeg(image):
     out = io.BytesIO()
@@ -90,38 +86,38 @@ def overlay(image, result, threshold=0.35, selected=None):
     return canvas, rows
 
 @st.cache_resource(show_spinner=False)
-def load_model(api_key):
-    from inference import get_model
-    return get_model(model_id=MODEL, api_key=api_key or None)
+def load_model():
+    from transformers import pipeline
+    return pipeline("zero-shot-object-detection", model=MODEL, device=-1)
 
 def infer(model, image):
-    import numpy as np
-    bgr = np.asarray(image)[:, :, ::-1].copy()
-    result = model.infer(bgr, confidence=0.1)
-    if isinstance(result, list):
-        result = result[0]
-    if hasattr(result, "model_dump"):
-        result = result.model_dump(mode="json")
-    elif hasattr(result, "dict"):
-        result = result.dict()
-    if not isinstance(result, dict) or not isinstance(result.get("predictions"), list):
-        raise ValueError("Unexpected local inference response")
-    return result
+    labels = ["liver", "heart", "lungs", "kidney", "spleen", "gallbladder",
+              "gizzard", "small intestine", "large intestine", "ovary",
+              "ovarian follicle", "trachea", "tongue", "abdominal fat"]
+    detections = model(image, candidate_labels=labels, threshold=0.1)
+    w,h = image.size
+    predictions = []
+    for p in detections:
+        b = p["box"]
+        x1,y1,x2,y2 = (float(b[k]) for k in ("xmin","ymin","xmax","ymax"))
+        predictions.append({"class": str(p["label"]).strip().rstrip("."),
+                            "confidence": float(p["score"]),
+                            "x": (x1+x2)/2, "y": (y1+y2)/2,
+                            "width": x2-x1, "height": y2-y1})
+    return {"image":{"width":w,"height":h},"predictions":predictions}
 
 def main():
     st.set_page_config(page_title="가금류 부검 분석", page_icon="🔬", layout="wide")
     st.title("가금류 부검 사진 · 장기 인식")
-    st.caption("BioVision Chicken / 9개 장기 / 로컬 추론 · 연구용")
+    st.caption("Grounding DINO / Zero-shot 로컬 추론 · 연구용")
     st.warning("장기 인식 실험용입니다. 질병 진단 또는 정상 판정 기능은 아닙니다.")
     with st.sidebar:
         st.header("모델 설정")
         st.write(MODEL)
-        st.markdown("[모델 정보](https://universe.roboflow.com/na-u0cmg/biovision_chicken)")
-        api_key = st.text_input("모델 다운로드 인증키 (필요한 경우)", value=os.getenv("ROBOFLOW_API_KEY", ""), type="password")
-        st.markdown("[API 키 발급](https://app.roboflow.com/)")
+        st.markdown("[모델 정보](https://huggingface.co/IDEA-Research/grounding-dino-tiny)")
         threshold = st.slider("표시 신뢰도 기준", 0.0, 1.0, 0.35, 0.05)
         compare = st.checkbox("원본 함께 표시", value=True)
-        st.caption("사진 추론은 맥북에서 직접 실행합니다. 모델 최초 다운로드 및 인증에는 인터넷과 키가 필요할 수 있습니다. 클라우드 추론 대체 경로는 없습니다.")
+        st.caption("최초 실행 시 공개 가중치를 다운로드합니다. 이후 CPU 로컬 추론을 수행합니다. API 키는 필요하지 않습니다. 닭 장기 특화 모델이 아니므로 검출 결과는 전문가 검증이 필요합니다.")
     uploads = st.file_uploader("부검 사진 여러 장 선택 또는 드래그", type=["jpg","jpeg","png","webp"], accept_multiple_files=True)
     if "results" not in st.session_state:
         st.session_state.results = {}
@@ -133,10 +129,10 @@ def main():
     if st.button("전체 사진 자동 분석", type="primary", disabled=not items):
         try:
             with st.spinner("로컬 모델 로딩 중 (최초 실행 시 가중치 다운로드)"):
-                client = load_model(api_key)
+                client = load_model()
         except Exception as exc:
             msg = str(exc)
-            st.error("로컬 모델을 불러오지 못했습니다: " + (msg.replace(api_key,"[REDACTED]") if api_key else msg)[:500])
+            st.error("로컬 모델을 불러오지 못했습니다: " + msg[:500])
             st.stop()
         st.session_state.results = {}
         bar = st.progress(0)
@@ -146,7 +142,7 @@ def main():
                 st.session_state.results[uid] = {"image": image, "result": infer(client,image)}
             except Exception as exc:
                 # Do not expose API secrets potentially embedded in error messages.
-                st.session_state.results[uid] = {"error": (str(exc).replace(api_key,"[REDACTED]") if api_key else str(exc))[:500]}
+                st.session_state.results[uid] = {"error": str(exc)[:500]}
             bar.progress((i+1)/len(items), text=f"{i+1}/{len(items)} 분석 완료")
     available = sorted({str(p["class"]) for uid,_,_ in items
                         for p in st.session_state.results.get(uid,{}).get("result",{}).get("predictions",[])})
